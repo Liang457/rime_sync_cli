@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# Client config (user-specific, don't overwrite on pull)
+client_config.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI assistant context files (local only, not part of the repo)
+.claude/
+AGENTS.md
+CLAUDE.md
+.qoder/
+
+# OS
+Thumbs.db
+.DS_Store
