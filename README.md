@@ -1,174 +1,92 @@
-# rime-sync CLI 客户端
+# rime-sync CLI 客户端（v2 同步专用）
 
-rime-sync 的命令行客户端。通过 HTTP API 和 rime-server 通信，在 Windows 和 Android（Termux）上同步 Rime 配置与用户输入词库。依赖只有 `requests` 和 `pyyaml`。
+rime-sync 服务器的同步专用命令行客户端。**只做同步这一件事**：
+把服务器上的词库/配置镜像到本机 Rime 目录，与其他设备互换用户词库快照，
+最后触发小狼毫重新部署。v1 的 25 个管理子命令（remote-sync 编排、
+update-rime-ice、行级编辑等）已全部移除——管理动作去服务器的 Web 控制台做。
 
-## 功能
+```
+python cli.py sync   # 全流程：
+                     #   ① manifest 差量 → 下载/删除本地文件
+                     #   ② 拉取其他设备用户词库快照
+                     #   ③ WeaselDeployer /sync（librime 合并 + 导出本机快照）
+                     #   ④ 推送本机快照到服务器
+                     #   ⑤ 有文件变更时 WeaselDeployer /deploy
+```
 
-- **交互式菜单**：不带参数运行即可用
-- **命令行模式**：25 个子命令，方便脚本和定时任务
-- **远端批量同步**：`remote-sync` 一条命令跑完「更新 rime-ice → 复制 runtime → 批量跑词库脚本 → 插入词库」
-- **词库增量同步**：cn/en/lua/opencc 按类别走 SHA3-256 哈希对比，只传变更文件
-- **用户输入词库增量同步**：从 `installation.yaml` 读设备标识，哈希对比后只传变更，冲突按 mtime 新者胜
-- **完整同步**：整体下载配置包，或用本地配置上传初始化服务器
-- **配置文件编辑**：远程行级编辑服务器上的配置文件
-- **配置迁移**：旧版配置文件自动迁移到新版格式
+> 协议契约：manifest 的 `sha3-256:<hex>` 与 `installation_id` 语义是与服务端
+> 和后续输入法内置客户端（同文/小狼毫 fork）的公共线协议，不要改。
 
 ## 安装
 
-- Python 3.12+（tar 解压用到 `filter='data'`）
-- 依赖：`requests`、`pyyaml`
+- Python 3.12+，依赖只有 `requests` 和 `pyyaml`
+- Windows + 小狼毫环境可触发 `/sync` `/deploy`；其他平台跳过并提示手动操作
 
 ```bash
 pip install requests pyyaml
 ```
-
-## 快速开始
-
-把 `cli.py` 和 `core/` 放到 Rime 配置目录（Windows 是 `%APPDATA%\Rime`），然后：
-
-```bash
-pip install requests pyyaml
-python cli.py
-```
-
-首次运行会生成 `client_config.json` 并退出。编辑它，填好服务器地址和 Rime 目录，再跑一次就能用。
 
 ## 配置
 
-`client_config.json` 示例：
+`client_config.json`（放在 cli.py 同目录；首次运行自动生成，v1 的旧配置文件
+直接兼容，无需改动）：
 
 ```json
 {
-  "server": {
-    "url": "http://192.168.1.100:10032",
-    "timeout": 30,
-    "retry_count": 3,
-    "verify_ssl": false,
-    "api_token": ""
-  },
-  "rime": {
-    "config_dir": "C:\\Users\\Username\\AppData\\Roaming\\Rime",
-    "platform": "windows"
-  },
-  "sync": {
-    "device_name": ""
-  },
-  "logging": {
-    "level": "INFO",
-    "file": "logs/rime_client.log",
-    "max_size_mb": 10
-  }
+  "server": { "url": "http://192.168.8.8:10032", "api_token": "", "timeout": 30 },
+  "rime": { "config_dir": "C:\\Users\\...\\AppData\\Roaming\\Rime", "platform": "windows" },
+  "sync": { "device_name": "Win" },
+  "deploy": { "weasel_dir": "" }
 }
 ```
 
-`device_name` 留空时自动从 `installation.yaml` 的 `installation_id` 读取。服务器开了 `api_token` 的话，这里要填一样的值；旧配置缺这个字段会自动补 `""`。
+- `sync.device_name` 留空时从 `installation.yaml` 的 `installation_id` 读取
+- `deploy.weasel_dir` 留空时自动搜索小狼毫安装目录
+- v2 新增 `deploy` 节，旧配置缺这项会自动补默认值
 
 ## 使用
 
-### 交互式菜单
-
 ```bash
-python cli.py
+python cli.py init               # 生成/校验配置
+python cli.py status             # 服务器健康与统计
+python cli.py manifest           # 本地与服务器差量预览（不下载）
+python cli.py sync               # 全流程同步
+python cli.py sync --dry-run     # 只打印计划
+python cli.py sync --no-userdb   # 跳过用户词库环节
+python cli.py sync --no-deploy   # 跳过重新部署
+python cli.py userdb push|pull   # 手动推拉用户词库快照
+python cli.py deploy             # 只触发 /deploy（--sync-only 触发 /sync）
 ```
 
-不带参数会直接进菜单；想在脚本里强制进菜单就加 `interactive`。
+`--config <路径>` 可指定其他配置文件。
 
-### 常用命令
+## 同步语义
 
-```bash
-# 服务器状态
-python cli.py status
-
-# 远端批量同步（默认强制更新 rime-ice）
-python cli.py remote-sync
-python cli.py remote-sync 6.5.1          # 指定版本号
-python cli.py remote-sync --no-force --no-add-to-dict
-
-# 更新 rime-ice
-python cli.py update-rime-ice --force
-
-# 跑词库脚本（版本缺省时由服务器分配）
-python cli.py run-script yuanshen 6.5.1
-python cli.py run-all-scripts
-
-# 用户输入词库
-python cli.py sync-userdb --action upload
-python cli.py sync-userdb --action download
-
-# 词库增量同步
-python cli.py sync-dict --category cn
-python cli.py sync-dict                     # 全部类别
-
-# 完整同步
-python cli.py full-sync-download
-python cli.py full-sync-upload backup.zip --overwrite
-
-# 其他
-python cli.py device-list
-python cli.py sync-info
-python cli.py health
-```
-
-### 全部命令
-
-| 命令 | 作用 |
-|------|------|
-| `status` | 服务器状态 |
-| `update-rime-ice` | 更新 rime-ice 仓库（`--force` 强制拉取，仅 commit 变化时重建 runtime） |
-| `copy-to-runtime` | 强制重建 runtime（生成词库从备份回填，保留 mtime） |
-| `remote-sync [version]` | 远端批量同步，可加 `--no-force` / `--no-add-to-dict` / `--dict-line` |
-| `run-script <name> [version]` | 跑单个词库脚本，缺省版本由服务器分配 |
-| `run-all-scripts [version]` | 跑全部词库脚本 |
-| `list-scripts` | 列出服务器可用脚本 |
-| `edit-file <path> <line> <content>` | 编辑服务器配置文件 |
-| `upload-config <file>` | 上传 `*.custom.yaml` |
-| `sync-userdb` | 用户输入词库增量同步（上传/下载） |
-| `sync-upload-tar` | 上传用户词库 tar 包 |
-| `sync-upload-file <file>` | 上传单个用户词库文件 |
-| `sync-info` | 用户词库同步信息 |
-| `sync-download-tar` | 下载用户词库 tar 包 |
-| `sync-download-file <filename>` | 下载单个用户词库文件 |
-| `sync-dict` | 词库增量同步（cn/en/lua/opencc） |
-| `dict-info` | 词库信息 |
-| `dict-download-tar` | 下载词库 tar 包 |
-| `dict-download-file <filename>` | 下载单个词库文件 |
-| `full-sync-info` | 完整配置包信息 |
-| `full-sync-download` | 下载完整配置包 |
-| `full-sync-upload <file>` | 上传完整配置包 |
-| `device-list` | 已注册设备 |
-| `health` | 健康检查 |
-| `interactive` | 交互式菜单 |
-
-## 注意
-
-- `installation.yaml` 是设备标识，删了同步就找不到设备了
-- 上传完整配置包会覆盖服务器配置，操作前确认
-- `sync-dict` 和 `full-sync-download` 会把 tar 直接解到 Rime 目录，覆盖同名文件
-- Windows 上 `full-sync-download` 会先关掉 WeaselServer.exe 再重启，跑的时候别用着输入法
-- 服务器 Token 走明文 HTTP，只在可信局域网用，或配 HTTPS
+- **服务器永远是对的**（镜像语义）：本地手动改动不会回流，下次同步被服务器
+  版本覆盖；本地新增的无关文件不受影响，只有「上次同步装上的、服务器已删除
+  的」文件会被清理（靠 `.rime_client_state.json` 记账，勿删）。
+- 用户词库：`pull` 把其他设备的快照放到 `sync/<设备>/`；本机 `/sync` 时
+  librime 把它们合并进用户数据库并导出本机新快照；`push` 把本机快照回传。
+  顺序必须是 pull → /sync → push。
+- Token 走明文 HTTP，只在可信局域网用，或配 HTTPS。
 
 ## 目录结构
 
 ```
 rime_sync_cli/
-├── cli.py              # 入口（25 个子命令 + 交互菜单）
+├── cli.py              # 入口（init/status/manifest/sync/userdb/deploy）
 ├── core/
-│   ├── config.py       # 配置管理（自动补默认值、旧版迁移）
-│   ├── api.py          # HTTP 客户端（重试、token 认证）
-│   ├── sync.py         # 用户词库哈希增量同步
-│   ├── dicts.py        # 词库增量同步
-│   ├── fullsync.py     # 完整配置同步
-│   ├── hash_utils.py   # SHA3-256
-│   ├── tar_utils.py    # tar 安全解压
-│   ├── platform.py     # 平台相关（Weasel 启停）
-│   ├── logs.py         # 日志轮转与归档
-│   └── errors.py       # 异常
-├── client_config.json  # 客户端配置（首次运行自动生成）
-├── run_win.ps1         # Windows 快速启动
-└── 快速同步.ps1         # 快速同步脚本
+│   ├── config.py       # client_config.json 加载（兼容 v1 配置）
+│   ├── api.py          # HTTP 客户端（重试、token、下载）
+│   ├── filesync.py     # manifest 差量计划与落地（.rime_client_state.json 记账）
+│   ├── userdb.py       # installation.yaml / 快照推拉
+│   ├── weasel.py       # WeaselDeployer.exe /sync /deploy 调用
+│   ├── tar_utils.py    # tar 安全解包与打包
+│   └── hash_utils.py   # SHA3-256
+└── tests/              # pytest
 ```
 
 ## 相关项目
 
-- [rime-sync 服务器](https://github.com/Liang457/rime_sync)
-- [rime-sync Android 客户端](https://github.com/Liang457/rime_sync_android)
+- [rime-sync 服务器](https://github.com/Liang457/rime_sync)（v2：统一文件库 + Web 控制台）
+- [rime_dict](../rime_dict)——词库生成，publish 到服务器后各设备同步拉取

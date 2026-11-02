@@ -1,53 +1,39 @@
-import logging
-import shutil
+"""tar 安全解包。"""
+from __future__ import annotations
+
+import io
 import tarfile
 from pathlib import Path
-from typing import List
-
-logger = logging.getLogger(__name__)
 
 
-def safe_join(base_dir: Path, name: str) -> Path:
-    """将（可能来自服务端的）相对路径安全地拼接在 base_dir 下。
-    拒绝绝对路径、'..' 穿越、以及通过符号链接逃逸出 base_dir 的路径。"""
-    base = base_dir.resolve()
-    target = (base / name).resolve()
-    if not target.is_relative_to(base):
-        raise ValueError(f"拒绝路径: 路径遍历攻击 {name}")
-    return target
+def extract_tar_gz(data: bytes, dest: Path) -> int:
+    """把 tar.gz 解到 dest（包内相对路径原样映射），返回解出的文件数。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
+    count = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        for member in tf.getmembers():
+            if member.isdev() or not member.isfile():
+                continue
+            name = member.name.replace("\\", "/")
+            if any(part in ("", ".", "..") for part in name.split("/")):
+                raise ValueError(f"tar 内出现非法路径: {member.name}")
+            out = dest / name
+            if dest_resolved not in out.resolve().parents:
+                raise ValueError(f"tar 内路径越界: {member.name}")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            out.write_bytes(src.read())
+            count += 1
+    return count
 
 
-def save_bytes(base_dir: Path, filename: str, data: bytes) -> Path:
-    """将字节数据安全地保存到 base_dir 下的 filename 路径，返回最终路径。"""
-    local_path = safe_join(base_dir, filename)
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(local_path, "wb") as f:
-        f.write(data)
-    return local_path
-
-
-def extract_tar(tar_path: Path, extract_dir: Path) -> List[str]:
-    extracted_files = []
-
-    try:
-        with tarfile.open(tar_path, "r") as tar_ref:
-            for member in tar_ref.getmembers():
-                if member.isfile():
-                    target_path = safe_join(extract_dir, member.name)
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    with tar_ref.extractfile(member) as source, open(target_path, 'wb') as target:
-                        shutil.copyfileobj(source, target, length=64 * 1024)
-
-                    extracted_files.append(str(target_path))
-                    logger.debug(f"解压文件: {member.name} -> {target_path}")
-
-            logger.info(f"从tar解压了 {len(extracted_files)} 个文件")
-            return extracted_files
-
-    except tarfile.ReadError:
-        raise RuntimeError(f"tar文件损坏: {tar_path}")
-    except ValueError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"解压tar文件失败: {e}")
+def make_tar_gz(files: dict[str, Path]) -> bytes:
+    """把 {包内路径: 本地文件} 打成 tar.gz。"""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for arcname, path in sorted(files.items()):
+            tf.add(str(path), arcname=arcname, recursive=False)
+    return buf.getvalue()

@@ -1,208 +1,93 @@
-import copy
+"""客户端配置：client_config.json，缺项自动补默认值并写回。"""
+from __future__ import annotations
+
 import json
-import logging
+import os
 from pathlib import Path
-from typing import Dict, Any, Optional
 
-import yaml
-
-from core.errors import ConfigError
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "client_config.json"
-
-DEFAULTS = {
+DEFAULTS: dict = {
     "server": {
-        "url": "http://localhost:10032",
-        "timeout": 30,
-        "retry_count": 3,
-        "verify_ssl": False,
+        "url": "http://192.168.1.100:10033",
         "api_token": "",
-        "sync_all_timeout": 1800,
+        "timeout": 30,
     },
     "rime": {
-        "config_dir": ".",
-        "platform": "windows",
-        "android_trime_config": "",
+        # 留空 = 自动探测 %APPDATA%\Rime（Windows）
+        "config_dir": "",
+        "platform": "windows",  # windows | linux | termux
     },
     "sync": {
+        # 留空 = 从 installation.yaml 读 installation_id
         "device_name": "",
     },
-    "logging": {
-        "level": "INFO",
-        "file": "logs/rime_client.log",
-        "max_size_mb": 10,
-        "archive_enabled": True,
-        "archive_retention_days": 90,
+    "deploy": {
+        # 留空 = 自动搜索 WeaselDeployer.exe
+        "weasel_dir": "",
     },
 }
 
 
-class ConfigManager:
-    def __init__(self, config_path: Optional[Path] = None):
-        self.config_path = config_path or DEFAULT_CONFIG_PATH
-        self.config: Dict[str, Any] = {}
-        self.load()
+def default_config_dir() -> str:
+    if os.name == "nt":
+        return os.path.join(os.environ.get("APPDATA", ""), "Rime")
+    return os.path.expanduser("~/.config/ibus/rime")
 
-    def load(self):
-        if not self.config_path.exists():
-            logger.error(f"配置文件不存在: {self.config_path}")
-            logger.info("正在创建默认配置文件...")
-            self.create_default()
-            raise ConfigError(
-                f"默认配置文件已创建: {self.config_path}\n请编辑配置文件后重新运行"
-            )
 
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            raw_config = copy.deepcopy(config)
-            config = self._migrate(config)
-            self._apply_defaults(config)
+class ClientConfig:
+    def __init__(self, path: Path):
+        self.path = path
+        self.data = self._load()
 
-            if not config["sync"]["device_name"]:
-                config["sync"]["device_name"] = self._read_device_from_installation(config)
+    def _load(self) -> dict:
+        data: dict = {}
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        merged = json.loads(json.dumps(DEFAULTS))
+        for section, values in data.items():
+            if isinstance(values, dict):
+                merged.setdefault(section, {}).update(values)
+            else:
+                merged[section] = values
+        if merged != data or not self.path.exists():
+            self._write(merged)
+        return merged
 
-            self.config = config
-            # 旧配置文件缺少新增选项时自动补充并写回，保证向后兼容
-            if self.config != raw_config:
-                logger.info("配置文件缺少选项，已自动补充默认值并保存")
-                self.save()
-        except json.JSONDecodeError as e:
-            raise ConfigError(f"配置文件格式错误: {e}")
-        except ConfigError:
-            raise
-        except Exception as e:
-            raise ConfigError(f"加载配置文件失败: {e}")
+    def _write(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
 
-    def _migrate(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        if "rime" in config and "sync" in config:
-            return config
-
-        new_config = {"server": {}, "rime": {}, "sync": {}, "logging": {}}
-
-        if "server" in config:
-            new_config["server"] = config["server"]
-
-        new_config["rime"] = {
-            "config_dir": config.get("paths", {}).get("local_rime_dir", "."),
-            "platform": "windows",
-            "android_trime_config": "",
-        }
-
-        new_config["sync"] = {
-            "device_name": config.get("device", {}).get("name", ""),
-        }
-
-        if "logging" in config:
-            new_config["logging"] = config["logging"]
-
-        return new_config
-
-    @staticmethod
-    def _merge_defaults(defaults: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-        """递归合并默认配置：data 中已有的值优先，缺失的键由 defaults 补充。"""
-        if isinstance(defaults, dict) and isinstance(data, dict):
-            result = dict(data)
-            for key, value in defaults.items():
-                if key in result:
-                    result[key] = ConfigManager._merge_defaults(value, result[key])
-                else:
-                    result[key] = copy.deepcopy(value)
-            return result
-        return data
-
-    def _apply_defaults(self, config: Dict[str, Any]):
-        for section, values in DEFAULTS.items():
-            config[section] = self._merge_defaults(values, config.get(section, {}))
-
-    def create_default(self):
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(copy.deepcopy(DEFAULTS), f, indent=2, ensure_ascii=False)
-
-        logger.info(f"已创建默认配置文件: {self.config_path}")
-        logger.info("请编辑配置文件并设置正确的服务器URL和Rime配置目录")
-
-    def save(self):
-        try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
-            logger.info(f"配置已保存: {self.config_path}")
-        except Exception as e:
-            raise ConfigError(f"保存配置失败: {e}")
-
-    def _read_device_from_installation(self, config: Dict[str, Any]) -> str:
-        config_dir = Path(config["rime"]["config_dir"])
-        installation_path = config_dir / "installation.yaml"
-
-        if not installation_path.exists():
-            logger.warning(f"installation.yaml文件不存在: {installation_path}")
-            return "unknown"
-
-        try:
-            with open(installation_path, "r", encoding="utf-8") as f:
-                installation_data = yaml.safe_load(f)
-
-            device_name = installation_data.get("installation_id")
-            if not device_name:
-                logger.warning("installation.yaml中没有找到installation_id字段")
-                return "unknown"
-
-            logger.debug(f"从installation.yaml获取到设备名: {device_name}")
-            return device_name
-
-        except yaml.YAMLError as e:
-            logger.warning(f"解析installation.yaml失败: {e}")
-            return "unknown"
-        except Exception as e:
-            logger.warning(f"读取installation.yaml失败: {e}")
-            return "unknown"
+    # ---- 便捷访问 --------------------------------------------------------
 
     @property
     def server_url(self) -> str:
-        return self.config["server"]["url"]
-
-    @property
-    def config_dir(self) -> Path:
-        return Path(self.config["rime"]["config_dir"])
-
-    @property
-    def timeout(self) -> int:
-        return self.config["server"]["timeout"]
-
-    @property
-    def retry_count(self) -> int:
-        return self.config["server"].get("retry_count", 3)
-
-    @property
-    def sync_all_timeout(self) -> int:
-        return self.config["server"].get("sync_all_timeout", 1800)
-
-    @property
-    def verify_ssl(self) -> bool:
-        return self.config["server"].get("verify_ssl", False)
+        return self.data["server"]["url"].rstrip("/")
 
     @property
     def api_token(self) -> str:
-        return self.config["server"].get("api_token", "")
+        return self.data["server"]["api_token"]
+
+    @property
+    def timeout(self) -> int:
+        return int(self.data["server"]["timeout"])
 
     @property
     def platform(self) -> str:
-        return self.config["rime"]["platform"]
+        return self.data["rime"]["platform"]
 
     @property
-    def log_config(self) -> Dict[str, Any]:
-        return self.config.get("logging", {})
-
-    @property
-    def sync_config(self) -> Dict[str, Any]:
-        return self.config.get("sync", {})
+    def config_dir(self) -> Path:
+        raw = self.data["rime"]["config_dir"].strip()
+        return Path(raw) if raw else Path(default_config_dir())
 
     @property
     def device_name(self) -> str:
-        device_name = self.config["sync"]["device_name"]
-        if not device_name or device_name == "unknown":
-            device_name = self._read_device_from_installation(self.config)
-            self.config["sync"]["device_name"] = device_name
-        return device_name
+        return self.data["sync"]["device_name"].strip()
+
+    @property
+    def weasel_dir(self) -> str:
+        return self.data["deploy"]["weasel_dir"].strip()
