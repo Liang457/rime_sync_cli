@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,6 +32,22 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / "client_config.json"
 
 def out(msg: str) -> None:
     print(msg, flush=True)
+
+
+def ensure_silent_stdio() -> None:
+    """pythonw/计划任务下没有控制台，stdout/stderr 为 None，print 会炸；
+    此时把两路输出都接到 logs/task_run.log，保证静默运行也有失败日志。"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_path = Path(__file__).resolve().parent / "logs" / "task_run.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(log_path, "a", buffering=1, encoding="utf-8")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    handle.write(f"---- {stamp} 定时同步开始 ----\n")
+    if sys.stdout is None:
+        sys.stdout = handle
+    if sys.stderr is None:
+        sys.stderr = handle
 
 
 def make_client(cfg: ClientConfig) -> ApiClient:
@@ -192,6 +209,7 @@ def main() -> int:
                        help="触发 /sync（用户词库）而不是 /deploy")
 
     args = parser.parse_args()
+    ensure_silent_stdio()
     if not args.command:
         parser.print_help()
         return 1
